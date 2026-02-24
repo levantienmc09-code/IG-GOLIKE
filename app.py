@@ -47,27 +47,34 @@ def parse_cookie_line(cookie_line):
     return cookie_line.strip(), "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 #====================================================
-# KIỂM TRA COOKIE VÀ LẤY USERNAME
+# KIỂM TRA COOKIE CÒN SỐNG - CHÍNH XÁC HƠN
 #====================================================
-def check_and_get_username(cookie, user_agent, proxy=None):
+def check_cookie_alive(cookie, proxy=None):
     try:
         headers = {
             "Cookie": cookie,
-            "User-Agent": user_agent,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,/;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
         }
         proxies = {'http': proxy, 'https': proxy} if proxy else None
-
-        # Thử lấy bằng API trước
+        
+        # Thử check bằng API graphql trước
         token = None
         for part in cookie.split(';'):
             if 'csrftoken=' in part:
                 token = part.strip().split('=')[1]
                 break
+            if 'sessionid=' in part:
+                # Có sessionid là dấu hiệu tốt
+                pass
         
+        # Nếu có token, thử dùng API
         if token:
             api_headers = {
                 "Cookie": cookie,
-                "User-Agent": user_agent,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "X-CSRFToken": token,
                 "X-IG-App-ID": "936619743392459",
             }
@@ -78,8 +85,97 @@ def check_and_get_username(cookie, user_agent, proxy=None):
                 try:
                     data = api_resp.json()
                     if data.get('status') == 'ok' and data.get('user'):
-                        username = data['user'].get('username')
-                        return True, username
+                        return True
+                except:
+                    pass
+        
+        # Fallback: check bằng web
+        r = requests.get("https://www.instagram.com/accounts/edit/",
+                        headers=headers,
+                        proxies=proxies,
+                        timeout=15,
+                        allow_redirects=False)
+        
+        # Cookie live nếu:
+        # 1. Status code 200 và không có từ khóa login
+        # 2. Status code 302 nhưng không redirect về login
+        # 3. Có username trong response
+        
+        if r.status_code == 200:
+            text_lower = r.text.lower()
+            
+            # Nếu có từ khóa này => đang ở trang login => die
+            if 'login' in text_lower and 'password' in text_lower and 'sign up' in text_lower:
+                return False
+            
+            # Nếu có username trong response => live
+            username_match = re.search(r'"username":"([^"]+)"', r.text)
+            if username_match:
+                return True
+            
+            # Nếu có các dấu hiệu của account
+            indicators = ['csrf_token', 'account_id', 'edit_profile']
+            for indicator in indicators:
+                if indicator in r.text:
+                    return True
+            
+            return True  # Mặc định là live nếu không có dấu hiệu của login
+            
+        elif r.status_code == 302:
+            location = r.headers.get('location', '').lower()
+            # Nếu redirect về login => die
+            if 'login' in location or 'accounts/login' in location:
+                return False
+            return True  # Redirect đi nơi khác => live
+            
+        elif r.status_code == 403 or r.status_code == 404:
+            # Có thể bị chặn tạm thời, vẫn coi là live
+            return True
+            
+        return True  # Mặc định là live nếu không có lỗi rõ ràng
+        
+    except requests.exceptions.Timeout:
+        # Timeout có thể do mạng, không phải do cookie die
+        return True
+    except requests.exceptions.ConnectionError:
+        return True
+    except Exception as e:
+        print(f"Check cookie error: {e}")
+        return True  # Mặc định là live nếu có lỗi
+
+#====================================================
+# LẤY USERNAME TỪ COOKIE
+#====================================================
+def get_username_from_cookie(cookie, proxy=None):
+    try:
+        headers = {
+            "Cookie": cookie,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
+        proxies = {'http': proxy, 'https': proxy} if proxy else None
+
+        # Thử lấy bằng API
+        token = None
+        for part in cookie.split(';'):
+            if 'csrftoken=' in part:
+                token = part.strip().split('=')[1]
+                break
+        
+        if token:
+            api_headers = {
+                "Cookie": cookie,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "X-CSRFToken": token,
+                "X-IG-App-ID": "936619743392459",
+            }
+            api_url = "https://www.instagram.com/api/v1/accounts/current_user/?edit=true"
+            api_resp = requests.get(api_url, headers=api_headers, proxies=proxies, timeout=10)
+            
+            if api_resp.status_code == 200:
+                try:
+                    data = api_resp.json()
+                    if data.get('status') == 'ok' and data.get('user'):
+                        return data['user'].get('username')
                 except:
                     pass
 
@@ -91,23 +187,22 @@ def check_and_get_username(cookie, user_agent, proxy=None):
         patterns = [
             r'"username":"([^"]+)"',
             r'"username"\s*:\s*"([^"]+)"',
+            r'username":"([^"]+)"'
         ]
         
         for pattern in patterns:
             m = re.search(pattern, r.text)
             if m:
-                username = m.group(1)
-                return True, username
+                return m.group(1)
 
-        return False, None
-        
+        return None
     except Exception as e:
-        return False, None
+        return None
 
 #====================================================
 # FOLLOW EVANS
 #====================================================
-def follow_evans(cookie: str, user_agent: str, proxy: str = None) -> bool:
+def follow_evans(cookie: str, proxy: str = None) -> bool:
     try:
         cookies_str = cookie
         token = None
@@ -126,7 +221,7 @@ def follow_evans(cookie: str, user_agent: str, proxy: str = None) -> bool:
             'cookie': cookies_str,
             'origin': 'https://www.instagram.com',
             'referer': 'https://www.instagram.com/',
-            'user-agent': user_agent,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'x-csrftoken': token,
             'x-ig-app-id': '936619743392459',
         }
@@ -139,10 +234,7 @@ def follow_evans(cookie: str, user_agent: str, proxy: str = None) -> bool:
 
         if resp.status_code == 200:
             result = resp.json()
-            is_ok = result.get("status") == "ok"
-            friendship = result.get("friendship_status", {})
-            is_already_following = friendship.get("following") is True
-            return is_ok or is_already_following
+            return result.get("status") == "ok"
 
         return False
     except Exception as e:
@@ -151,7 +243,7 @@ def follow_evans(cookie: str, user_agent: str, proxy: str = None) -> bool:
 #====================================================
 # FOLLOW TARGET
 #====================================================
-def follow_target_job(cookie: str, user_agent: str, target_id: str, proxy: str = None) -> bool:
+def follow_target_job(cookie: str, target_id: str, proxy: str = None) -> bool:
     try:
         cookies_str = cookie
         token = None
@@ -169,7 +261,7 @@ def follow_target_job(cookie: str, user_agent: str, target_id: str, proxy: str =
             'cookie': cookies_str,
             'origin': 'https://www.instagram.com',
             'referer': 'https://www.instagram.com/',
-            'user-agent': user_agent,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'x-csrftoken': token,
             'x-ig-app-id': '936619743392459',
         }
@@ -190,7 +282,7 @@ def follow_target_job(cookie: str, user_agent: str, target_id: str, proxy: str =
 #====================================================
 # LIKE JOB
 #====================================================
-def like_post(cookie: str, user_agent: str, post_url: str, proxy: str = None) -> bool:
+def like_post(cookie: str, post_url: str, proxy: str = None) -> bool:
     try:
         m = re.search(r"/p/([^/]+)/", post_url)
         if not m:
@@ -208,7 +300,7 @@ def like_post(cookie: str, user_agent: str, post_url: str, proxy: str = None) ->
 
         headers = {
             "Cookie": cookie,
-            "User-Agent": user_agent,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-CSRFToken": token,
             "X-IG-App-ID": "936619743392459",
             "Referer": post_url,
@@ -216,7 +308,6 @@ def like_post(cookie: str, user_agent: str, post_url: str, proxy: str = None) ->
 
         proxies = {'http': proxy, 'https': proxy} if proxy else None
 
-        # Lấy media_id từ shortcode
         info_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
         info_resp = requests.get(info_url, headers=headers, timeout=10, proxies=proxies)
 
@@ -227,35 +318,16 @@ def like_post(cookie: str, user_agent: str, post_url: str, proxy: str = None) ->
         media_id = None
 
         try:
-            if "items" in info and len(info["items"]) > 0:
-                media_id = info["items"][0]["id"]
-            elif "graphql" in info and "shortcode_media" in info["graphql"]:
-                media_id = info["graphql"]["shortcode_media"]["id"]
-            elif "id" in info:
-                media_id = info["id"]
+            media_id = info["items"][0]["id"]
         except:
-            return False
-
-        if not media_id:
-            return False
-
-        # Like post
-        like_url = f"https://www.instagram.com/api/v1/media/{media_id}/like/"
-        like_headers = headers.copy()
-        like_headers.update({
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://www.instagram.com',
-        })
-
-        r = requests.post(like_url, headers=like_headers, timeout=10, proxies=proxies)
-        
-        if r.status_code == 200:
             try:
-                result = r.json()
-                return result.get("status") == "ok"
+                media_id = info["graphql"]["shortcode_media"]["id"]
             except:
-                return True if '"status":"ok"' in r.text else False
-        return False
+                return False
+
+        like_url = f"https://www.instagram.com/api/v1/media/{media_id}/like/"
+        r = requests.post(like_url, headers=headers, timeout=10, proxies=proxies)
+        return r.status_code == 200
     except Exception as e:
         return False
 
@@ -270,8 +342,6 @@ class GolikeManager:
             "User-Agent": "Mozilla/5.0",
             "Content-Type": "application/json"
         }
-        self.auth_token = auth_token
-        self.t_value = t_value
 
     def get_user_info(self):
         try:
@@ -329,6 +399,36 @@ class GolikeManager:
             return None
 
 #====================================================
+# THÊM ACCOUNT VÀO GOLIKE
+#====================================================
+def add_to_golike(gm, username):
+    try:
+        # Kiểm tra đã có chưa
+        accs = gm.get_accounts()
+        if accs and accs.get("status") == 200:
+            accounts_data = accs.get("data") or accs.get("accounts") or []
+            for acc in accounts_data:
+                acc_username = acc.get("instagram_username") or acc.get("username")
+                if acc_username and acc_username.lower() == username.lower():
+                    return {"success": True, "acc_id": acc.get("id"), "message": "Đã có sẵn"}
+        
+        # Thêm mới
+        add = gm.add_account(username)
+        if add and add.get("success"):
+            time.sleep(2)
+            accs_new = gm.get_accounts()
+            if accs_new and accs_new.get("status") == 200:
+                accounts_data_new = accs_new.get("data") or accs_new.get("accounts") or []
+                for acc in accounts_data_new:
+                    acc_username = acc.get("instagram_username") or acc.get("username")
+                    if acc_username and acc_username.lower() == username.lower():
+                        return {"success": True, "acc_id": acc.get("id"), "message": "Đã thêm thành công"}
+        
+        return {"success": False, "message": "Không thể thêm vào Golike"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+#====================================================
 # CHẠY JOB CHO 1 TÀI KHOẢN
 #====================================================
 def run_account_job(session_id, account_index, gm, base_delay):
@@ -336,126 +436,93 @@ def run_account_job(session_id, account_index, gm, base_delay):
     account = ses['accounts'][account_index]
     
     cookie = account['cookie']
-    user_agent = account['user_agent']
     proxy = account.get('proxy')
     username = account['username']
     
-    # Setup account ID trên Golike
-    try:
-        accs = gm.get_accounts()
-        accounts_data = []
-        if accs and accs.get("status") == 200:
-            if "data" in accs:
-                accounts_data = accs["data"]
-            elif "accounts" in accs:
-                accounts_data = accs["accounts"]
-        
-        acc_id = None
-        for acc in accounts_data:
-            acc_username = acc.get("instagram_username") or acc.get("username")
-            if acc_username and acc_username.lower() == username.lower():
-                acc_id = acc.get("id")
-                break
-        
-        if not acc_id:
-            # Thêm tài khoản mới
-            add = gm.add_account(username)
-            if add and add.get("success"):
-                time.sleep(2)
-                accs_new = gm.get_accounts()
-                if accs_new and accs_new.get("status") == 200:
-                    accounts_data_new = accs_new.get("data") or accs_new.get("accounts") or []
-                    for acc in accounts_data_new:
-                        acc_username = acc.get("instagram_username") or acc.get("username")
-                        if acc_username and acc_username.lower() == username.lower():
-                            acc_id = acc.get("id")
-                            break
-        
-        if not acc_id:
+    # Lấy acc_id từ Golike
+    if not account.get('acc_id'):
+        result = add_to_golike(gm, username)
+        if result.get('success'):
+            account['acc_id'] = result.get('acc_id')
+        else:
             account['status'] = 'error'
+            with log_lock:
+                ses['last_log'] = f"[{username}] ❌ Lỗi: {result.get('message')}"
             return
-        
-        account['acc_id'] = acc_id
-    except Exception as e:
-        account['status'] = 'error'
-        return
     
-    last_check = 0
     last_log = ""
+    cookie_check_counter = 0
     
     while running_jobs.get(session_id, False):
         try:
-            # Check cookie mỗi 20 job (giảm tần suất check)
-            if last_check >= 20:
-                alive, new_username = check_and_get_username(cookie, user_agent, proxy)
-                if not alive:
+            # Kiểm tra cookie ít hơn, mỗi 20 job
+            cookie_check_counter += 1
+            if cookie_check_counter >= 20:
+                if not check_cookie_alive(cookie, proxy):
                     account['status'] = 'die'
                     with log_lock:
-                        ses['last_log'] = f"[{username}] ❌ Cookie đã hết hạn"
+                        ses['last_log'] = f"[{username}] ❌ Cookie die"
                     break
-                last_check = 0
+                cookie_check_counter = 0
             
-            # Đếm ngược delay - chỉ log khi số thay đổi
-            for i in range(base_delay, 0, -1):
-                if not running_jobs.get(session_id, False):
-                    break
-                current_log = f"[{username}] ⏳ Chờ {i} giây"
-                if current_log != last_log:
-                    with log_lock:
-                        ses['last_log'] = current_log
-                    last_log = current_log
-                time.sleep(1)
-            
+            # Delay - chỉ hiển thị 1 lần
             if not running_jobs.get(session_id, False):
                 break
-            
-            current_log = f"[{username}] 🔍 Đang tìm job..."
+    
+            current_log = f"[{username}] ⏳ Delay {base_delay}s"
             if current_log != last_log:
                 with log_lock:
                     ses['last_log'] = current_log
-                last_log = current_log
+            last_log = current_log
+    
+            time.sleep(base_delay)
+
+            if not running_jobs.get(session_id, False):
+                break
             
-            job = gm.get_job(acc_id)
+            # Get job
+            current_log = f"[{username}] 🔍 Đang tìm job..."
+            with log_lock:
+                ses['last_log'] = current_log
+            last_log = current_log
+            
+            job = gm.get_job(account['acc_id'])
+            
             if not job or not job.get("data"):
-                current_log = f"[{username}] ⚠️ Không có job, chờ 5 giây..."
-                if current_log != last_log:
-                    with log_lock:
-                        ses['last_log'] = current_log
-                    last_log = current_log
-                time.sleep(5)
+                current_log = f"[{username}] ⚠️ Không có job"
+                with log_lock:
+                    ses['last_log'] = current_log
+                last_log = current_log
+                time.sleep(random.randint(5, 10))
                 continue
 
             info = job["data"]
             job_type = info["type"]
             job_id = info["id"]
+            target = info["object_id"]
             
-            if job_type == "follow":
-                current_log = f"[{username}] 🔄 Đang follow..."
-            else:
-                current_log = f"[{username}] ❤️ Đang like..."
-                
-            if current_log != last_log:
-                with log_lock:
-                    ses['last_log'] = current_log
-                last_log = current_log
+            current_log = f"[{username}] ⚙️ Đang {job_type}..."
+            with log_lock:
+                ses['last_log'] = current_log
+            last_log = current_log
             
             job_success = False
             money = 0
 
             if job_type == "follow":
-                target = info["object_id"]
-                ok = follow_target_job(cookie, user_agent, target, proxy)
+                ok = follow_target_job(cookie, target, proxy)
                 if ok:
                     current_log = f"[{username}] 💰 Đang nhận xu..."
                     with log_lock:
                         ses['last_log'] = current_log
-                    complete = gm.complete_job(acc_id, job_id)
+                    
+                    complete = gm.complete_job(account['acc_id'], job_id)
                     if complete and complete.get("success"):
                         money = complete.get("data", {}).get("prices", 0)
                         account['stats']['money'] += money
                         account['stats']['success'] += 1
                         job_success = True
-                        current_log = f"[{username}] ✅ Hoàn thành +{money} xu"
+                        current_log = f"[{username}] ✅ +{money}"
                         with log_lock:
                             ses['last_log'] = current_log
                         last_log = current_log
@@ -467,25 +534,26 @@ def run_account_job(session_id, account_index, gm, base_delay):
                         last_log = current_log
                 else:
                     account['stats']['fail'] += 1
-                    current_log = f"[{username}] ❌ Follow thất bại"
+                    current_log = f"[{username}] ❌ Follow fail"
                     with log_lock:
                         ses['last_log'] = current_log
                     last_log = current_log
 
             elif job_type == "like":
                 link = info.get("link", "")
-                ok = like_post(cookie, user_agent, link, proxy)
+                ok = like_post(cookie, link, proxy)
                 if ok:
                     current_log = f"[{username}] 💰 Đang nhận xu..."
                     with log_lock:
                         ses['last_log'] = current_log
-                    complete = gm.complete_job(acc_id, job_id)
+                    
+                    complete = gm.complete_job(account['acc_id'], job_id)
                     if complete and complete.get("success"):
                         money = complete.get("data", {}).get("prices", 0)
                         account['stats']['money'] += money
                         account['stats']['success'] += 1
                         job_success = True
-                        current_log = f"[{username}] ✅ Hoàn thành +{money} xu"
+                        current_log = f"[{username}] ✅ Nhận được {money} xu"
                         with log_lock:
                             ses['last_log'] = current_log
                         last_log = current_log
@@ -497,26 +565,24 @@ def run_account_job(session_id, account_index, gm, base_delay):
                         last_log = current_log
                 else:
                     account['stats']['fail'] += 1
-                    current_log = f"[{username}] ❌ Like thất bại"
+                    current_log = f"[{username}] ❌ Like fail"
                     with log_lock:
                         ses['last_log'] = current_log
                     last_log = current_log
 
             if not job_success:
                 try:
-                    gm.skip_job(acc_id, info)
+                    gm.skip_job(account['acc_id'], info)
                 except:
                     pass
 
-            last_check += 1
             time.sleep(2)
 
         except Exception as e:
-            current_log = f"[{username}] ❌ Lỗi: {str(e)[:30]}"
-            if current_log != last_log:
-                with log_lock:
-                    ses['last_log'] = current_log
-                last_log = current_log
+            current_log = f"[{username}] ❌ Lỗi"
+            with log_lock:
+                ses['last_log'] = current_log
+            last_log = current_log
             time.sleep(5)
     
     account['status'] = 'stopped'
@@ -529,20 +595,17 @@ def run_unlimited_jobs(session_id, base_delay):
     ses = user_sessions[session_id]
     gm = ses["golike"]
     
-    # Reset status cho tất cả accounts
     for acc in ses['accounts']:
         acc['status'] = 'active'
     
-    # Tạo thread cho mỗi account
     threads = []
     for i in range(len(ses['accounts'])):
         thread = Thread(target=run_account_job, args=(session_id, i, gm, base_delay))
         thread.daemon = True
         thread.start()
         threads.append(thread)
-        time.sleep(1.5)  # Giảm delay giữa các account
+        time.sleep(1)
     
-    # Đợi các thread kết thúc
     for thread in threads:
         thread.join()
     
@@ -633,7 +696,6 @@ def configure_golike():
     if not session_id or not auth_line:
         return jsonify({'success': False, 'message': 'Thiếu thông tin'})
     
-    # Parse Auth|T
     if '|' in auth_line:
         parts = auth_line.split('|', 1)
         token = parts[0].strip()
@@ -681,19 +743,22 @@ def add_cookies():
         user_sessions[session_id] = {'accounts': [], 'delay': 5}
     
     proxy = parse_proxy(proxy_input) if proxy_input != 'skip' else None
+    gm = user_sessions[session_id].get("golike")
     
-    # Parse từng dòng cookie
     cookie_lines = [line.strip() for line in cookies_text.split('\n') if line.strip()]
     
     results = []
     success_count = 0
     
     for line in cookie_lines:
-        cookie, ua = parse_cookie_line(line)
+        # Parse cookie
+        if '|' in line:
+            cookie_part = line.split('|')[0].strip()
+        else:
+            cookie_part = line.strip()
         
-        # Kiểm tra và lấy username
-        alive, username = check_and_get_username(cookie, ua, proxy)
-        
+        # Lấy username
+        username = get_username_from_cookie(cookie_part, proxy)
         if not username:
             results.append(f'❌ Không lấy được username')
             continue
@@ -709,12 +774,14 @@ def add_cookies():
         if exists:
             continue
         
-        if not alive:
-            results.append(f'⚠️ @{username} die, bỏ qua')
-            continue
+        # Parse đầy đủ
+        cookie, ua = parse_cookie_line(line)
         
-        # Follow Evans
-        follow_evans(cookie, ua, proxy)
+        # Follow Evans (không bắt buộc)
+        try:
+            follow_evans(cookie, proxy)
+        except:
+            pass
         
         # Thêm vào danh sách
         account = {
@@ -726,9 +793,19 @@ def add_cookies():
             'stats': {'success': 0, 'fail': 0, 'money': 0}
         }
         
+        # Nếu có Golike, tự động thêm vào
+        if gm:
+            result = add_to_golike(gm, username)
+            if result.get('success'):
+                account['acc_id'] = result.get('acc_id')
+                results.append(f'✅ @{username} (đã thêm Golike)')
+            else:
+                results.append(f'✅ @{username} (lỗi thêm Golike)')
+        else:
+            results.append(f'✅ @{username}')
+        
         user_sessions[session_id]['accounts'].append(account)
         success_count += 1
-        results.append(f'✅ @{username}')
     
     message = f'✅ Đã thêm {success_count}/{len(cookie_lines)} tài khoản'
     
@@ -795,7 +872,7 @@ def stop_job():
     return jsonify({'success': True, 'message': '⏹️ Đã dừng job'})
 
 #====================================================
-# HTML TEMPLATE - GIAO DIỆN ĐẸP, ÍT LAG
+# HTML TEMPLATE
 #====================================================
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -812,10 +889,10 @@ HTML_TEMPLATE = '''
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(145deg, #4158D0 0%, #C850C0 46%, #FFCC70 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            padding: 20px;
+            padding: 16px;
         }
 
         .container {
@@ -823,74 +900,52 @@ HTML_TEMPLATE = '''
             margin: 0 auto;
         }
 
-        /* Header */
         .header {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 24px;
-            padding: 30px;
-            margin-bottom: 24px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+            background: white;
+            border-radius: 20px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
             text-align: center;
-            border: 1px solid rgba(255, 255, 255, 0.3);
         }
 
         .header h1 {
-            background: linear-gradient(135deg, #4158D0, #C850C0);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            font-size: 2.8em;
-            margin-bottom: 10px;
-            font-weight: 700;
+            color: #333;
+            font-size: 2.2em;
+            margin-bottom: 8px;
         }
 
         .header p {
             color: #666;
-            font-size: 1.1em;
-            font-weight: 400;
+            font-size: 1em;
         }
 
-        /* Panel */
         .panel {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 24px;
-            padding: 28px;
-            margin-bottom: 24px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-        }
-
-        .panel:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+            background: white;
+            border-radius: 20px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         }
 
         .panel h2 {
             color: #333;
-            margin-bottom: 24px;
-            padding-bottom: 12px;
-            border-bottom: 2px solid #e0e0e0;
-            font-size: 1.6em;
-            font-weight: 600;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #f0f0f0;
+            font-size: 1.4em;
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
         }
 
-        .panel h2 i {
-            font-size: 1.2em;
-        }
-
-        /* Form elements */
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 16px;
         }
 
         .form-group label {
             display: block;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
             color: #555;
             font-weight: 500;
             font-size: 0.95em;
@@ -899,62 +954,89 @@ HTML_TEMPLATE = '''
         .form-group input,
         .form-group textarea {
             width: 100%;
-            padding: 14px 18px;
-            border: 2px solid #eaeef2;
-            border-radius: 16px;
-            font-size: 15px;
-            transition: all 0.2s ease;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            font-size: 14px;
+            transition: border-color 0.2s;
             background: white;
         }
 
         .form-group input:focus,
         .form-group textarea:focus {
             outline: none;
-            border-color: #4158D0;
-            box-shadow: 0 0 0 3px rgba(65, 88, 208, 0.1);
+            border-color: #667eea;
         }
 
         .form-group textarea {
-            height: 130px;
+            height: 120px;
             resize: vertical;
-            font-family: 'Courier New', monospace;
+            font-family: monospace;
             font-size: 13px;
         }
 
-        /* Buttons */
         .btn {
-            background: linear-gradient(145deg, #4158D0, #7340c0);
+            background: #667eea;
             color: white;
             border: none;
-            padding: 15px 25px;
-            border-radius: 18px;
+            padding: 14px 20px;
+            border-radius: 12px;
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
             width: 100%;
-            transition: all 0.2s ease;
-            margin-bottom: 10px;
-            box-shadow: 0 8px 15px rgba(65, 88, 208, 0.3);
+            transition: all 0.2s;
+            margin-bottom: 8px;
+            position: relative;
         }
 
         .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 12px 20px rgba(65, 88, 208, 0.4);
+            background: #5a67d8;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
         }
 
         .btn:active {
             transform: translateY(0);
-            box-shadow: 0 5px 10px rgba(65, 88, 208, 0.3);
+        }
+
+        .btn.loading {
+            pointer-events: none;
+            opacity: 0.8;
+        }
+
+        .btn.loading::after {
+            content: "";
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            top: 50%;
+            right: 20px;
+            transform: translateY(-50%);
+            border: 2px solid transparent;
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: translateY(-50%) rotate(360deg); }
         }
 
         .btn-success {
-            background: linear-gradient(145deg, #11998e, #38ef7d);
-            box-shadow: 0 8px 15px rgba(17, 153, 142, 0.3);
+            background: #48bb78;
+        }
+
+        .btn-success:hover {
+            background: #38a169;
         }
 
         .btn-danger {
-            background: linear-gradient(145deg, #eb3349, #f45c43);
-            box-shadow: 0 8px 15px rgba(235, 51, 73, 0.3);
+            background: #f56565;
+        }
+
+        .btn-danger:hover {
+            background: #e53e3e;
         }
 
         .btn:disabled {
@@ -964,99 +1046,86 @@ HTML_TEMPLATE = '''
             box-shadow: none;
         }
 
-        /* Status box */
         .status-box {
-            margin-top: 15px;
-            padding: 15px;
-            border-radius: 16px;
-            background: #f8fafd;
+            margin-top: 12px;
+            padding: 12px;
+            border-radius: 12px;
+            background: #f7fafc;
             border: 1px solid #e2e8f0;
-            max-height: 200px;
+            max-height: 150px;
             overflow-y: auto;
             font-size: 13px;
-            line-height: 1.6;
+            line-height: 1.5;
         }
 
-        .success { color: #11998e; font-weight: 600; }
-        .error { color: #eb3349; font-weight: 600; }
+        .success { color: #48bb78; font-weight: 600; }
+        .error { color: #f56565; font-weight: 600; }
 
-        /* Log panel */
         .log-panel {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 24px;
-            padding: 28px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.3);
+            background: white;
+            border-radius: 20px;
+            padding: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         }
 
         .log-messages {
-            height: 140px;
+            height: 120px;
             overflow-y: auto;
-            background: #1e293b;
-            color: #cbd5e1;
-            padding: 16px;
-            border-radius: 18px;
-            font-family: 'JetBrains Mono', 'Fira Code', monospace;
-            font-size: 13px;
-            line-height: 1.6;
+            background: #1a202c;
+            color: #cbd5e0;
+            padding: 12px;
+            border-radius: 12px;
+            font-family: monospace;
+            font-size: 12px;
+            line-height: 1.5;
         }
 
         .log-messages div {
             margin-bottom: 4px;
-            padding-bottom: 4px;
-            border-bottom: 1px solid #334155;
+            padding-bottom: 2px;
+            border-bottom: 1px solid #2d3748;
         }
 
-        /* Stats */
         .stats {
             display: flex;
             justify-content: space-around;
-            margin: 20px 0;
-            padding: 25px;
-            background: #f8fafd;
-            border-radius: 20px;
-            gap: 20px;
+            margin: 16px 0;
+            padding: 16px;
+            background: #f7fafc;
+            border-radius: 16px;
         }
 
         .stat-item {
             text-align: center;
-            flex: 1;
         }
 
         .stat-value {
-            font-size: 32px;
+            font-size: 28px;
             font-weight: 700;
-            background: linear-gradient(145deg, #4158D0, #C850C0);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            color: #667eea;
             line-height: 1.2;
         }
 
         .stat-label {
-            color: #64748b;
-            font-size: 14px;
-            font-weight: 500;
+            color: #718096;
+            font-size: 13px;
         }
 
-        /* Info bar */
         .info-bar {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            padding: 16px 24px;
-            border-radius: 18px;
-            margin-bottom: 24px;
+            background: white;
+            padding: 12px 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            border: 1px solid rgba(255, 255, 255, 0.3);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
             font-size: 14px;
         }
 
-        /* Accounts list */
         .accounts-list {
-            margin-top: 15px;
-            max-height: 280px;
+            margin-top: 12px;
+            max-height: 250px;
             overflow-y: auto;
         }
 
@@ -1064,83 +1133,79 @@ HTML_TEMPLATE = '''
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 14px 18px;
-            background: #f8fafd;
-            border-radius: 16px;
-            margin-bottom: 8px;
-            border-left: 4px solid #4158D0;
-            transition: all 0.2s ease;
+            padding: 12px 16px;
+            background: #f7fafc;
+            border-radius: 12px;
+            margin-bottom: 6px;
+            border-left: 4px solid #667eea;
+            transition: all 0.2s;
         }
 
         .account-item:hover {
             background: white;
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
-            transform: translateX(3px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         }
 
         .account-info {
             display: flex;
             align-items: center;
-            gap: 15px;
+            gap: 12px;
             flex-wrap: wrap;
         }
 
         .account-username {
             font-weight: 600;
-            color: #1e293b;
+            color: #2d3748;
         }
 
         .account-status {
-            padding: 4px 12px;
-            border-radius: 30px;
-            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 20px;
+            font-size: 10px;
             font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.3px;
         }
 
         .status-active {
-            background: linear-gradient(145deg, #11998e, #38ef7d);
+            background: #48bb78;
             color: white;
         }
 
         .status-die {
-            background: linear-gradient(145deg, #eb3349, #f45c43);
+            background: #f56565;
             color: white;
         }
 
         .account-stats {
-            color: #64748b;
-            font-size: 12px;
+            color: #718096;
+            font-size: 11px;
             display: flex;
-            gap: 10px;
+            gap: 8px;
         }
 
         .remove-account {
-            color: #eb3349;
+            color: #f56565;
             cursor: pointer;
-            padding: 8px 12px;
-            border-radius: 12px;
-            transition: all 0.2s ease;
-            font-weight: 600;
-            font-size: 13px;
+            padding: 4px 8px;
+            border-radius: 8px;
+            transition: all 0.2s;
+            font-size: 12px;
         }
 
         .remove-account:hover {
-            background: #eb3349;
+            background: #f56565;
             color: white;
         }
 
-        /* Grid layout */
         .grid-2 {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 20px;
+            gap: 16px;
         }
 
         .flex-row {
             display: flex;
-            gap: 15px;
+            gap: 12px;
             align-items: flex-end;
         }
 
@@ -1148,10 +1213,9 @@ HTML_TEMPLATE = '''
             display: none;
         }
 
-        /* Scrollbar */
         ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
+            width: 6px;
+            height: 6px;
         }
 
         ::-webkit-scrollbar-track {
@@ -1160,8 +1224,12 @@ HTML_TEMPLATE = '''
         }
 
         ::-webkit-scrollbar-thumb {
-            background: linear-gradient(145deg, #4158D0, #C850C0);
+            background: #a0aec0;
             border-radius: 10px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #718096;
         }
     </style>
 </head>
@@ -1169,96 +1237,75 @@ HTML_TEMPLATE = '''
     <div class="container">
         <div class="header">
             <h1>⚡ Golike Auto Bot</h1>
-            <p>Auth Token | T Value — Cookie Instagram | User Agent</p>
+            <p>Auth|T — Cookie|UA</p>
         </div>
         
-        <div class="info-bar" id="session-info">
-            <span>🔹 <span id="session-id">Đang khởi tạo...</span></span>
+        <div class="info-bar">
+            <span>🔹 <span id="session-id">Đang tạo...</span></span>
             <span id="session-status">⭕ Sẵn sàng</span>
         </div>
         
         <!-- Cấu hình Golike -->
         <div class="panel">
-            <h2>
-                <span>🔑</span>
-                Cấu hình Golike
-            </h2>
+            <h2>🔑 Cấu hình Golike</h2>
             <div class="form-group">
                 <label>Auth Token | T Value:</label>
-                <input type="text" id="golike-auth" placeholder="eyJ0eXAiOiJKV1QiLCJhbGc...|1710835200">
+                <input type="text" id="golike-auth" placeholder="token|tvalue">
             </div>
-            <button class="btn" onclick="configureGolike()" id="btn-golike">
-                <span>💾</span> Lưu cấu hình
-            </button>
+            <button class="btn" onclick="configureGolike()" id="btn-golike">💾 Lưu</button>
             <div id="golike-status" class="status-box hidden"></div>
         </div>
         
         <!-- Thêm Cookie -->
         <div class="panel">
-            <h2>
-                <span>🍪</span>
-                Cookie Instagram
-            </h2>
+            <h2>🍪 Cookie Instagram</h2>
             <div class="form-group">
-                <label>Danh sách cookie (mỗi dòng một cookie, có thể kèm User Agent sau dấu |):</label>
-                <textarea id="ig-cookies" placeholder="ig_did=08F56...;sessionid=80271...|Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36
-ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)"></textarea>
+                <label>Danh sách cookie (mỗi dòng 1 cái):</label>
+                <textarea id="ig-cookies" placeholder="cookie|ua"></textarea>
             </div>
             <div class="form-group">
-                <label>Proxy (host:port:user:pass hoặc 'skip' để bỏ qua):</label>
-                <input type="text" id="ig-proxy" value="skip" placeholder="skip">
+                <label>Proxy (host:port:user:pass hoặc skip):</label>
+                <input type="text" id="ig-proxy" value="skip">
             </div>
-            <button class="btn btn-success" onclick="addCookies()" id="btn-cookies">
-                <span>📥</span> Thêm tất cả
-            </button>
+            <button class="btn btn-success" onclick="addCookies()" id="btn-cookies">📥 Thêm</button>
             <div id="cookies-status" class="status-box hidden"></div>
         </div>
         
         <!-- Danh sách tài khoản -->
         <div class="panel">
-            <h2>
-                <span>📋</span>
-                Tài khoản Instagram (<span id="account-count">0</span>)
-            </h2>
+            <h2>📋 Tài khoản (<span id="account-count">0</span>)</h2>
             <div id="accounts-list" class="accounts-list">
-                <p style="color: #94a3b8; text-align: center; padding: 20px;">Chưa có tài khoản nào</p>
+                <p style="color: #a0aec0; text-align: center;">Chưa có tài khoản</p>
             </div>
         </div>
         
-        <!-- Thống kê và điều khiển -->
+        <!-- Thống kê -->
         <div class="stats hidden" id="stats-panel">
             <div class="stat-item">
                 <div class="stat-value" id="stat-success">0</div>
-                <div class="stat-label">✅ Thành công</div>
+                <div class="stat-label">✅</div>
             </div>
             <div class="stat-item">
                 <div class="stat-value" id="stat-fail">0</div>
-                <div class="stat-label">❌ Thất bại</div>
+                <div class="stat-label">❌</div>
             </div>
             <div class="stat-item">
                 <div class="stat-value" id="stat-money">0</div>
-                <div class="stat-label">💰 Tổng xu</div>
+                <div class="stat-label">💰</div>
             </div>
         </div>
         
         <!-- Điều khiển -->
         <div class="panel">
-            <h2>
-                <span>⚙️</span>
-                Điều khiển
-            </h2>
+            <h2>⚙️ Điều khiển</h2>
             <div class="grid-2">
                 <div class="form-group">
-                    <label>Thời gian delay giữa các job (giây):</label>
+                    <label>Delay (giây):</label>
                     <input type="number" id="job-delay" value="5" min="1" max="30">
                 </div>
                 <div class="flex-row">
-                    <button class="btn btn-success" onclick="startJob()" id="btn-start" style="flex:1" disabled>
-                        <span>▶️</span> Bắt đầu
-                    </button>
-                    <button class="btn btn-danger" onclick="stopJob()" id="btn-stop" style="flex:1" disabled>
-                        <span>⏹️</span> Dừng
-                    </button>
+                    <button class="btn btn-success" onclick="startJob()" id="btn-start" style="flex:1" disabled>▶️ Start</button>
+                    <button class="btn btn-danger" onclick="stopJob()" id="btn-stop" style="flex:1" disabled>⏹️ Stop</button>
                 </div>
             </div>
             <div id="control-status" class="status-box hidden"></div>
@@ -1266,12 +1313,9 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
         
         <!-- Log -->
         <div class="log-panel">
-            <h2>
-                <span>📝</span>
-                Nhật ký hoạt động
-            </h2>
+            <h2>📝 Log</h2>
             <div class="log-messages" id="log-messages">
-                <div>⚡ Hệ thống đã sẵn sàng</div>
+                <div>⚡ Sẵn sàng</div>
             </div>
         </div>
     </div>
@@ -1293,7 +1337,7 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
                 sessionId = data.session_id;
                 localStorage.setItem('golike_session_id', sessionId);
                 
-                document.getElementById('session-id').textContent = sessionId.substr(0, 6) + '...';
+                document.getElementById('session-id').innerText = sessionId.substr(0, 6) + '...';
                 
                 if (data.has_golike) {
                     document.getElementById('golike-auth').value = data.golike_token + '|' + data.golike_t;
@@ -1324,7 +1368,7 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
                 startStatusUpdates();
                 
             } catch (error) {
-                addLog('❌ Lỗi kết nối: ' + error.message);
+                addLog('❌ Lỗi: ' + error.message);
             }
         }
         
@@ -1332,13 +1376,12 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
             if (message === lastLogMessage) return;
             
             const logDiv = document.getElementById('log-messages');
-            const time = new Date().toLocaleTimeString('vi-VN', { hour12: false });
+            const time = new Date().toLocaleTimeString();
             logDiv.innerHTML += `<div>[${time}] ${message}</div>`;
             logDiv.scrollTop = logDiv.scrollHeight;
-            
             lastLogMessage = message;
             
-            if (logDiv.children.length > 25) {
+            if (logDiv.children.length > 30) {
                 logDiv.removeChild(logDiv.children[0]);
             }
         }
@@ -1355,7 +1398,7 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
             }
             
             if (type === 'success' || type === 'error') {
-                setTimeout(() => element.classList.add('hidden'), 4000);
+                setTimeout(() => element.classList.add('hidden'), 3000);
             }
         }
         
@@ -1364,18 +1407,18 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
             const countSpan = document.getElementById('account-count');
             
             if (!accounts?.length) {
-                container.innerHTML = '<p style="color: #94a3b8; text-align: center; padding: 20px;">Chưa có tài khoản nào</p>';
-                countSpan.textContent = '0';
+                container.innerHTML = '<p style="color: #a0aec0; text-align: center;">Chưa có tài khoản</p>';
+                countSpan.innerText = '0';
                 document.getElementById('btn-start').disabled = true;
                 return;
             }
             
-            countSpan.textContent = accounts.length;
+            countSpan.innerText = accounts.length;
             
             let html = '';
             accounts.forEach(acc => {
                 const statusClass = acc.status === 'active' ? 'status-active' : 'status-die';
-                const statusText = acc.status === 'active' ? 'Đang hoạt động' : 'Đã hết hạn';
+                const statusText = acc.status === 'active' ? 'Live' : 'Die';
                 
                 html += `
                     <div class="account-item">
@@ -1388,7 +1431,7 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
                                 <span>💰 ${acc.stats?.money || 0}</span>
                             </span>
                         </div>
-                        <span class="remove-account" onclick="removeAccount('${acc.username}')">🗑️ Xóa</span>
+                        <span class="remove-account" onclick="removeAccount('${acc.username}')">🗑️</span>
                     </div>
                 `;
             });
@@ -1398,7 +1441,7 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
         }
         
         async function removeAccount(username) {
-            if (!confirm(`Bạn có chắc muốn xóa tài khoản @${username}?`)) return;
+            if (!confirm(`Xóa @${username}?`)) return;
             
             await fetch('/api/remove-account', {
                 method: 'POST',
@@ -1406,7 +1449,7 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
                 body: JSON.stringify({session_id: sessionId, username})
             });
             
-            addLog(`🗑️ Đã xóa tài khoản @${username}`);
+            addLog(`🗑️ Đã xóa @${username}`);
             getStatus();
         }
         
@@ -1414,19 +1457,26 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
             const authLine = document.getElementById('golike-auth').value;
             if (!authLine) return;
             
-            const response = await fetch('/api/configure-golike', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({session_id: sessionId, auth_line: authLine})
-            });
-            const data = await response.json();
+            const btn = document.getElementById('btn-golike');
+            btn.classList.add('loading');
             
-            showStatus('golike-status', data.message, data.success ? 'success' : 'error');
-            addLog(data.message);
-            
-            if (data.success) {
-                document.getElementById('btn-golike').disabled = true;
-                document.getElementById('golike-auth').disabled = true;
+            try {
+                const response = await fetch('/api/configure-golike', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({session_id: sessionId, auth_line: authLine})
+                });
+                const data = await response.json();
+                
+                showStatus('golike-status', data.message, data.success ? 'success' : 'error');
+                addLog(data.message);
+                
+                if (data.success) {
+                    document.getElementById('btn-golike').disabled = true;
+                    document.getElementById('golike-auth').disabled = true;
+                }
+            } finally {
+                btn.classList.remove('loading');
             }
         }
         
@@ -1436,16 +1486,23 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
             
             if (!cookies) return;
             
-            const response = await fetch('/api/add-cookies', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({session_id: sessionId, cookies, proxy})
-            });
-            const data = await response.json();
+            const btn = document.getElementById('btn-cookies');
+            btn.classList.add('loading');
             
-            showStatus('cookies-status', data.details || data.message, 'info');
-            addLog(data.message);
-            getStatus();
+            try {
+                const response = await fetch('/api/add-cookies', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({session_id: sessionId, cookies, proxy})
+                });
+                const data = await response.json();
+                
+                showStatus('cookies-status', data.details || data.message, 'info');
+                addLog(data.message);
+                getStatus();
+            } finally {
+                btn.classList.remove('loading');
+            }
         }
         
         async function startJob() {
@@ -1502,9 +1559,9 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
                 if (data.accounts) updateAccountsList(data.accounts);
                 
                 if (data.total_stats) {
-                    document.getElementById('stat-success').textContent = data.total_stats.success;
-                    document.getElementById('stat-fail').textContent = data.total_stats.fail;
-                    document.getElementById('stat-money').textContent = data.total_stats.money;
+                    document.getElementById('stat-success').innerText = data.total_stats.success;
+                    document.getElementById('stat-fail').innerText = data.total_stats.fail;
+                    document.getElementById('stat-money').innerText = data.total_stats.money;
                     document.getElementById('stats-panel').classList.remove('hidden');
                 }
                 
@@ -1533,7 +1590,7 @@ ig_did=084F56...;sessionid=80271...|Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like
         
         function startStatusUpdates() {
             if (statusInterval) clearInterval(statusInterval);
-            statusInterval = setInterval(getStatus, 3000); // Tăng lên 3 giây để giảm lag
+            statusInterval = setInterval(getStatus, 3000);
         }
         
         window.onload = initSession;
