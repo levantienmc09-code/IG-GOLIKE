@@ -522,7 +522,7 @@ def run_account_job(session_id, account_index, gm, base_delay):
                         account['stats']['money'] += money
                         account['stats']['success'] += 1
                         job_success = True
-                        current_log = f"[{username}] ✅ +{money}"
+                        current_log = f"[{username}] ✅ Nhận được {money} xu"
                         with log_lock:
                             ses['last_log'] = current_log
                         last_log = current_log
